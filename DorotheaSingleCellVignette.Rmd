@@ -51,7 +51,7 @@ known single-cell dataset.
 
 First of all, you need a current version of R (http://www.r-project.org). 
 `r Biocpkg("DoRothEA")` is a freely available annotation package deposited on 
-http://bioconductor.org/ and https://github.com/saezlab/DoRothEA. 
+http://bioconductor.org/ and https://github.com/christianholland/dorothea. 
 
 You can install it by running the following commands on an R console:
 
@@ -66,87 +66,12 @@ We also load here the packages and functions required  to run this script.
 
 ```{r, message = FALSE}
 ## We load the different required packages
+library(dorothea)
 library(dplyr)
 library(Seurat)
-library(ggplot2)
-library(tidyr)
-library(readr)
-library(pheatmap)
-library(viper)
-library(parallel)
 library(tibble)
-library(purrr)
-library(furrr)
-library(umap)
-
-options(future.globals.maxSize= 6291456000) # corresponds to 6 GB
-
-#' VIPER wrapper
-#'
-#' This function is a convenient wrapper to run the 
-#' \code{\link[=viper]{viper::viper()}} function to apply it on single cell 
-#' data
-#' 
-#' @import Seurat
-#' @import SingleCellExperiment
-#' @import viper
-#' @param InputObject An expression matrix with genes (HGNC symbol) in rows 
-#' and samples in columns. It also accepts \code{Seurat} and 
-#' \code{SingleCellExperiment} objects from which its normalised expresion 
-#' matrix will be extracted 
-#' @param regulon: Object of class regulon. Check  
-#' \code{\link[=viper]{viper::viper()}} for further information
-#' @param options A list of named options to pass to
-#' \code{\link[=viper]{viper::viper()}} such as \code{minsize} or 
-#' \code{method}. These options should not include \code{eset} or 
-#' \code{regulon}.
-#'
-#' @return A matrix containing the activity of the different TFs provided in 
-#' the regulon object.
-
-sc_viper = function(InputObject, regulon, options=list()) {
-    
-    if (class(InputObject) == "Seurat"){
-        expr <- InputObject[["RNA"]]@data
-    } else {
-        if(class(InputObject) == "SingleCellExperiment"){
-            expr <- normcounts(InputObject)
-        } else {
-            expr <- InputObject
-        }
-    }
-    
-    emat <- as.matrix(expr)
-    viper_res  <- do.call(viper,c(list(eset = emat,regulon = regulon),options))
-
-    return(viper_res)
-}
-
-#' df2regulon: Function to group DoRothEA regulons
-#'
-#' This function takes a data frame containing the TF-target interactions
-#' from DoRothEA and returns its associated regulons. 
-#'
-#' @import viper
-#' @import dplyr
-#' @import purrr
-#' @param df A data frame containing the TF-target interactions from DoRothEA,
-#' as stored in https://github.com/saezlab/ConservedFootprints/tree/master/data
-#'
-#' @return Object of class regulon. Check  
-#' \code{\link[=viper]{viper::viper()}} for further information
-
-df2regulon = function(df) {
-    regulon = df %>%
-        split(.$tf) %>%
-        map(function(dat) {
-            tf = dat %>% distinct(tf) %>% pull()
-            targets = setNames(dat$mor, dat$target)
-            likelihood = dat$likelihood
-            list(tfmode =targets, likelihood = likelihood)
-        })
-    return(regulon)
-}
+library(pheatmap)
+library(tidyr)
 ```
 
 # Example of usage
@@ -159,7 +84,7 @@ sake of simplicity, we follow the example provided in the following
 
 https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html 
 
-The dataset contains 2,700 Peripheral Blood Mononuclear Cells (PBMC) that were 
+The dataset contains 2700 Peripheral Blood Mononuclear Cells (PBMC) that were 
 sequenced on the Illumina NextSeq 500. This dataset is freely available in 
 10X Genomics: 
 
@@ -223,11 +148,22 @@ pbmc <- FindNeighbors(pbmc, dims = 1:10, verbose = FALSE)
 pbmc <- FindClusters(pbmc, resolution = 0.5, verbose = FALSE)
 pbmc <- RunUMAP(pbmc, dims = 1:10,  umap.method = 'umap-learn',  
     metric='correlation')
+
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25, 
+    logfc.threshold = 0.25, verbose = FALSE)
+
+## Assigning cell type identity to clusters
+new.cluster.ids <- c("Naive CD4 T", "Memory CD4 T", "CD14+ Mono", "B", "CD8 T", 
+    "FCGR3A+ Mono", "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
 ```
 
-```{r}
-DimPlot(pbmc, reduction = "umap")
+```{r, message = FALSE, warning = FALSE}
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 ```
+
+## Clustering cells with TF activity
 
 @Holland2019 showed that clustering the cells based on their TF activity 
 profiles can also be very interesting. Indeed, clustering cells using TF 
@@ -239,8 +175,7 @@ Here, we first run **VIPER** on **DoRothEA's** regulons to obtain TFs activity.
 
 ```{r, message=FALSE}
 ## We read Dorothea Regulons for Human:
-dorothea_regulon_human <- 
-    read_csv("https://raw.githubusercontent.com/saezlab/ConservedFootprints/master/data/dorothea_benchmark/regulons/dorothea_regulon_human_v1.csv")
+dorothea_regulon_human <- get(data("database_hs", package = "dorothea"))
 
 ## We obtain the regulons based on interactions with confidence level A, B and C
 regulon <- dorothea_regulon_human %>%
@@ -248,55 +183,26 @@ regulon <- dorothea_regulon_human %>%
     df2regulon()
 
 ## We compute Viper Scores 
-viper_scores <- sc_viper(pbmc, regulon, options = list(method = "scale", 
-    minsize = 4, eset.filter = FALSE, cores = 1, verbose = FALSE))
-
-## We transform Vipre scores into a data frame to better handling the resutls
-viper_scores_df <- 
-    data.frame(viper_scores,check.names = FALSE, stringsAsFactors = FALSE) %>% 
-    rownames_to_column("tf") %>%
-    data.frame(row.names = 1,stringsAsFactors = FALSE,check.names = FALSE) %>%
-    t() 
+pbmc <- scViper(pbmc, regulon, return_assay = TRUE, 
+    options = list(method = "scale", minsize = 4, eset.filter = FALSE, 
+    cores = 1, verbose = FALSE))
 ```
 
 We then apply `r CRANpkg("Seurat")` to cluster the cells following the same 
-protocol than above.
-
+protocol than above but using TF activity scores.
 
 ```{r, message=FALSE}
 ## We compute the Nearest Neighbours to perform cluster
-Neighbours <- FindNeighbors(viper_scores_df)
-Clusters <- FindClusters(Neighbours[[1]], verbose = FALSE)
+DefaultAssay(object = pbmc) <- "dorothea"
+pbmc <- ScaleData(pbmc)
+pbmc <- 
+    RunPCA(pbmc, features = rownames(pbmc), verbose = FALSE)
+pbmc <- FindNeighbors(pbmc, dims = 1:10, verbose = FALSE)
+pbmc <- FindClusters(pbmc, resolution = 0.5, verbose = FALSE)
 
-## We prepare the clusters to plot the results.
-Clusters <- Clusters %>% 
-    rownames_to_column("Cell") %>% 
-    dplyr::rename(CellType = res.0.8)
+pbmc <- RunUMAP(pbmc, dims = 1:10,  umap.method = 'umap-learn',  
+    metric='correlation')
 
-## We compute the umap coordinates
-dorothea_umap <- umap::umap(viper_scores_df, method="umap-learn") 
-dorothea_umap_coords <- dorothea_umap$layout %>%
-    data.frame(stringsAsFactors = FALSE, check.names = TRUE) %>%
-    rownames_to_column("Cell") %>%
-    dplyr::rename(UMAP_1 = X1, UMAP_2 = X2) %>%
-    inner_join(Clusters)
-
-```
-
-```{r}
-ggplot(dorothea_umap_coords, aes(UMAP_1, UMAP_2, color = CellType)) +
-    geom_point() + theme_bw()
-
-```
-
-## TF activity per cell population
-
-Following again `r CRANpkg("Seurat")` protocol, we next find the markers 
-that help to identify and discriminate the different cell popualations 
-present in the dataset under study.
-
-```{r, message = FALSE}
-## Finding differentially expressed features (cluster biomarkers)
 pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25, 
     logfc.threshold = 0.25, verbose = FALSE)
 
@@ -307,21 +213,30 @@ names(new.cluster.ids) <- levels(pbmc)
 pbmc <- RenameIdents(pbmc, new.cluster.ids)
 ```
 
-We plot again the clusters along with their cell type labels
-
 ```{r, message = FALSE, warning = FALSE}
 DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 ```
+
+## TF activity per cell population
 
 Finally, we characterice the different cell populations based on their 
 TF activities thanks to the previously computed **VIPER** scores on 
 **DoRothEA's** regulons. 
 
 ```{r, message = FALSE}
+## We transform Viper scores, scaled by seurat, into a data frame to better 
+## handling the results
+viper_scores_df <- 
+    data.frame(GetAssayData(pbmc, slot = "scale.data", assay = "dorothea"), 
+    check.names = FALSE, stringsAsFactors = FALSE) %>% 
+    rownames_to_column("tf") %>%
+    data.frame(row.names = 1,stringsAsFactors = FALSE,check.names = FALSE) %>%
+    t() 
+
 ## We create a data frame containing the cells and their clusters
 CellsClusters <- data.frame(Cell = names(Idents(pbmc)), 
-                            CellType = as.character(Idents(pbmc)),
-                            stringsAsFactors = FALSE)
+    CellType = as.character(Idents(pbmc)),
+    stringsAsFactors = FALSE)
 
 ## We create a data frame with the Viper score per cell and its clusters
 viper_scores_clusters <- viper_scores_df  %>%
@@ -374,6 +289,7 @@ viper_hmap <- pheatmap(t(summarized_viper_scores_df),fontsize=14,
                        treeheight_col = 0,  border_color = NA) 
 ```
 
+# References
 
 # Session info {.unnumbered}
 
@@ -381,4 +297,4 @@ viper_hmap <- pheatmap(t(summarized_viper_scores_df),fontsize=14,
 sessionInfo()
 ```
 
-# References
+
